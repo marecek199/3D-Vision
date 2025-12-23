@@ -7,277 +7,12 @@ import cv2 as cv
 import matplotlib.pyplot as plt
 from scipy.optimize import approx_fprime
 
-import utilsEngine as ue
-import optimizerEngine as oe
+from cv_engine.solvers import init_camera_matrix_zhang, compute_homography_normalized, get_extrinsics_from_homography
+from cv_engine.geometry import project, project_distorted
+from cv_engine.optimization import reprojection_error_multiple_views, reprojection_error_multiple_views_dist
+import cv_engine.utilsEngine as ue
 
-# ----------------------------------------------------
-# Hartley Normalization
-# ----------------------------------------------------
-def normalize_points(points):
-    ''' Center and scale points so centroid is 0 and avg dist is sqrt(2) '''
-    centroid = np.mean(points, axis=0)
-    shifted = points - centroid
-    avg_dist = np.mean(np.linalg.norm(shifted, axis=1))
-    scale = np.sqrt(2) / avg_dist
-    
-    T = np.eye(3)
-    T[0, 0] = scale
-    T[1, 1] = scale
-    T[0, 2] = -scale * centroid[0]
-    T[1, 2] = -scale * centroid[1]
-    
-    # Apply normalization
-    # Add ones for homogeneous coords
-    pts_h = np.hstack([points, np.ones((points.shape[0], 1))])
-    pts_norm = (T @ pts_h.T).T
-    
-    return pts_norm[:, :2], T
 
-# ----------------------------------------------------
-# PnP and calibration functions
-# ----------------------------------------------------
-
-def project(X, K, R, t):
-    ''' Project 3D points X into image points using camera matrix K, rotation R and translation t. '''
-    # Ensure X is Nx3
-    if X.shape[1] != 3: X = X.T
-    assert X.shape[1] == 3, "Input X must have three columns representing 3D points." 
-    
-    X_cam = R @ X.T + t.reshape((3, 1))
-    x_h = (K @ X_cam).T
-    x_h = x_h / x_h[:,-1].reshape((-1, 1))  # Normalize
-    return x_h[:, 0:2]
-
-def project_distorted(X, K, R, t, dist_coeffs):
-    ''' Project 3D points X into image points using camera matrix K, rotation R, translation t and lens distortion. '''
-    # Ensure X is Nx3
-    # 1. Transform to Camera Coordinates
-    if X.shape[1] != 3: X = X.T
-    X_cam = R @ X.T + t.reshape((3, 1)) # Shape (3, N)
-    
-    # 2. Normalize (divide by Z)
-    # Avoid division by zero
-    z = X_cam[2]
-    z[z == 0] = 1e-10
-    
-    x_n = X_cam[0] / z
-    y_n = X_cam[1] / z
-    
-    # 3. Apply Distortion (Brown-Conrady Model)
-    k1, k2, p1, p2, k3 = dist_coeffs
-    
-    r2 = x_n**2 + y_n**2
-    r4 = r2**2
-    r6 = r2**3
-    
-    # Radial distortion: (1 + k1*r^2 + k2*r^4 + k3*r^6)
-    radial = 1 + k1*r2 + k2*r4 + k3*r6
-    
-    # Tangential distortion
-    # x_tangential = 2*p1*x*y + p2*(r^2 + 2*x^2)
-    # y_tangential = p1*(r^2 + 2*y^2) + 2*p2*x*y
-    x_tan = 2*p1*x_n*y_n + p2*(r2 + 2*x_n**2)
-    y_tan = p1*(r2 + 2*y_n**2) + 2*p2*x_n*y_n
-    
-    x_distorted = x_n * radial + x_tan
-    y_distorted = y_n * radial + y_tan
-    
-    # 4. Project to Pixel Coordinates (Apply K)
-    # u = fx * x_dist + cx
-    # v = fy * y_dist + cy
-    u = K[0,0] * x_distorted + K[0,2]
-    v = K[1,1] * y_distorted + K[1,2]
-    
-    return np.vstack((u, v)).T
-
-def reprojection_error(params, X, x):
-    K, R, tvec = ue.unpack_params(params)
-    projected_points = project(X, K, R, tvec)
-    error = (projected_points - x).flatten()
-    return error
-
-def reprojection_error_multiple_views(unknown, Xs, xs):
-    # Extract K from first 3 parameters
-    fx, fy, cx, cy = unknown[0:4]
-    K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
-    
-    errors = []
-    for idx, (X, x) in enumerate(zip(Xs, xs)):
-        # Extract rotation and translation for this view
-        offset = 3 + idx * 6
-        rvec = unknown[offset:offset+3]
-        tvec = unknown[offset+3:offset+6]
-        
-        # Convert rvec to rotation matrix
-        R = Rotation.from_rotvec(rvec).as_matrix()
-        
-        # Project points
-        projected_points = project(X, K, R, tvec)
-        
-        # Calculate error for this view
-        error = (x - projected_points).flatten()
-        errors.append(error)
-    
-    # Concatenate all errors into a single flat array
-    return np.concatenate(errors)
-
-def reprojection_error_multiple_views_dist(params, obj_pts_list, img_pts_list):
-    fx, fy, cx, cy, k1, k2, p1, p2, k3 = params[0:9]
-    
-    residuals = []
-    for i, (obj_pts, img_pts) in enumerate(zip(obj_pts_list, img_pts_list)):
-        idx = 9 + i * 6
-        rvec = params[idx:idx+3]
-        tvec = params[idx+3:idx+6]
-        
-        R = Rotation.from_rotvec(rvec).as_matrix()
-        
-        # Project 3D points to Camera coordinates
-        X_cam = (R @ obj_pts.T).T + tvec
-        
-        # Normalize (x, y)
-        z = X_cam[:, 2]
-        # Avoid division by zero
-        z[np.abs(z) < 1e-6] = 1e-6
-        
-        x = X_cam[:, 0] / z
-        y = X_cam[:, 1] / z
-        
-        # Apply Distortion
-        r2 = x**2 + y**2
-        r4 = r2**2
-        r6 = r2**3
-        
-        radial = (1 + k1*r2 + k2*r4 + k3*r6)
-        tangential_x = 2*p1*x*y + p2*(r2 + 2*x**2)
-        tangential_y = p1*(r2 + 2*y**2) + 2*p2*x*y
-        
-        x_dist = x * radial + tangential_x
-        y_dist = y * radial + tangential_y
-        
-        # Project to Pixel coordinates
-        u = fx * x_dist + cx
-        v = fy * y_dist + cy
-        
-        proj_pts = np.column_stack([u, v])
-        residuals.append((proj_pts - img_pts).flatten())
-        
-    return np.concatenate(residuals)
-
-def compute_homography_normalized(obj_pts, img_pts):
-    ''' Computes H using DLT with Normalization '''
-    obj_planar = obj_pts[:, :2] # Drop Z
-    
-    obj_norm, T_obj = normalize_points(obj_planar)
-    img_norm, T_img = normalize_points(img_pts)
-    
-    n = obj_pts.shape[0]
-    A = np.zeros((2 * n, 9))
-    
-    for i in range(n):
-        X, Y = obj_norm[i]
-        u, v = img_norm[i]
-        A[2*i]   = [-X, -Y, -1,  0,  0,  0, u*X, u*Y, u]
-        A[2*i+1] = [ 0,  0,  0, -X, -Y, -1, v*X, v*Y, v]
-        
-    _, _, Vt = np.linalg.svd(A)
-    H_norm = Vt[-1].reshape(3, 3)
-    
-    # Denormalize
-    H = np.linalg.inv(T_img) @ H_norm @ T_obj
-    return H / H[2, 2]
-
-def create_v_ij(h, i, j):
-    ''' Helper for Zhang's closed form solution '''
-    # Convert indices 1-based to 0-based for python
-    i, j = i-1, j-1
-    
-    v_ij = np.array([
-        h[0, i] * h[0, j],
-        h[0, i] * h[1, j] + h[1, i] * h[0, j],
-        h[1, i] * h[1, j],
-        h[2, i] * h[0, j] + h[0, i] * h[2, j],
-        h[2, i] * h[1, j] + h[1, i] * h[2, j],
-        h[2, i] * h[2, j]
-    ])
-    return v_ij
-
-def init_camera_matrix_zhang(obj_pts_list, img_pts_list, img_size):
-    ''' 
-    Solves for K using Zhang's algebraic closed-form solution.
-    This avoids guessing 'f' and 'c'.
-    '''
-    V = []
-    homographies = []
-    
-    for obj_p, img_p in zip(obj_pts_list, img_pts_list):
-        H = compute_homography_normalized(obj_p, img_p)
-        homographies.append(H)
-        
-        # Constraints based on orthogonality of rotation columns
-        # h1, h2 are columns of H
-        # 1. h1.T * B * h2 = 0
-        # 2. h1.T * B * h1 = h2.T * B * h2
-        v12 = create_v_ij(H, 1, 2)
-        v11 = create_v_ij(H, 1, 1)
-        v22 = create_v_ij(H, 2, 2)
-        
-        V.append(v12)
-        V.append(v11 - v22)
-        
-    V = np.array(V)
-    
-    # Solve Vb = 0 using SVD
-    _, _, Vt = np.linalg.svd(V)
-    b = Vt[-1]
-    
-    # Construct B matrix (symmetric)
-    # B = [b0, b1, b3; 
-    #      b1, b2, b4; 
-    #      b3, b4, b5]
-    B11, B12, B22, B13, B23, B33 = b
-    
-    # Extract intrinsics from B (Zhang's Appendix B)
-    v0 = (B12 * B13 - B11 * B23) / (B11 * B22 - B12**2)
-    lambda_val = B33 - (B13**2 + v0 * (B12 * B13 - B11 * B23)) / B11
-    alpha = np.sqrt(lambda_val / B11)
-    beta = np.sqrt(lambda_val * B11 / (B11 * B22 - B12**2))
-    gamma = -B12 * alpha**2 * beta / lambda_val # Skew
-    u0 = gamma * v0 / beta - B13 * alpha**2 / lambda_val
-    
-    # Reconstruct K
-    K_est = np.array([
-        [alpha, gamma, u0],
-        [0,     beta,  v0],
-        [0,     0,     1]
-    ])
-    
-    # Sanity check: if values are negative or nan, fallback to guess
-    if np.isnan(K_est).any() or alpha < 0 or beta < 0:
-        print("Zhang's algebraic init failed (likely too few views or noise). using fallback.")
-        f_guess = (img_size[0] + img_size[1]) / 2
-        return np.array([[f_guess, 0, img_size[0]/2], [0, f_guess, img_size[1]/2], [0, 0, 1]]), homographies
-        
-    return K_est, homographies
-
-def get_extrinsics_from_homography(H, K):
-    ''' Recover R, t from Homography '''
-    h_norm = np.linalg.inv(K) @ H
-    scale = 1.0 / np.linalg.norm(h_norm[:, 0]) # lambda
-    
-    r1 = h_norm[:, 0] * scale
-    r2 = h_norm[:, 1] * scale
-    t  = h_norm[:, 2] * scale
-    r3 = np.cross(r1, r2)
-    
-    R_raw = np.column_stack((r1, r2, r3))
-    
-    # Force proper rotation matrix
-    U, _, Vt = np.linalg.svd(R_raw)
-    R = U @ Vt
-    if np.linalg.det(R) < 0: R = -R; t = -t
-        
-    return R, t
 
 def calibrate_DLT(obj_pts, img_pts, K) -> (np.ndarray, np.ndarray, np.ndarray):
     ''' Direct Linear Transform (DLT) method for PnP problem with unknown K '''
@@ -327,6 +62,7 @@ def calibrate_DLT(obj_pts, img_pts, K) -> (np.ndarray, np.ndarray, np.ndarray):
     t = t_raw / scale
     
     R, t = ue.ensure_depth_positive(R, t, obj_pts)
+
     
     return K, R, t
 
@@ -530,44 +266,52 @@ def calibrateCameraDist(obj_pts, img_pts, img_size):
     """Calibrate camera with distortion coefficients from multiple views."""
     images_num = len(img_pts)
     
-    # 1. Initialize Intrinsics (K) using Zhang's method
-    # This is robust for planar objects (chessboards)
-    try:
-        K_init, homographies = init_camera_matrix_zhang(obj_pts, img_pts, img_size)
-        fx_init = K_init[0,0]
-        fy_init = K_init[1,1]
-        cx_init = K_init[0,2]
-        cy_init = K_init[1,2]
-        print(f"Zhang's Init Successful: fx={fx_init:.2f}, fy={fy_init:.2f}")
-    except Exception as e:
-        print(f"Zhang's Init Failed ({e}), using heuristic.")
-        fx_init = fy_init = (img_size[0] + img_size[1]) / 2.0
-        cx_init = img_size[0] / 2.0
-        cy_init = img_size[1] / 2.0
-        K_init = np.array([[fx_init, 0, cx_init], [0, fy_init, cy_init], [0, 0, 1]])
-        # Fallback: compute homographies individually
-        homographies = []
-        for i in range(images_num):
-            # Assuming Z=0 for planar object, we can compute homography
-            # obj_pts is Nx3, take x,y
-            H, _ = cv.findHomography(obj_pts[i][:, :2].astype(np.float32), img_pts[i].astype(np.float32))
-            homographies.append(H)
+    fx_init = (img_size[0] + img_size[1]) / 2.0
+    fy_init = fx_init
+    cx_init = img_size[0] / 2.0
+    cy_init = img_size[1] / 2.0
+    K_init = np.array([[fx_init, 0, cx_init], [0, fy_init, cy_init], [0, 0, 1]])
+    
+    # # 1. Initialize Intrinsics (K) using Zhang's method
+    # # This is robust for planar objects (chessboards)
+    # try:
+    #     K_init, homographies = init_camera_matrix_zhang(obj_pts, img_pts, img_size)
+    #     fx_init = K_init[0,0]
+    #     fy_init = K_init[1,1]
+    #     cx_init = K_init[0,2]
+    #     cy_init = K_init[1,2]
+    #     print(f"Zhang's Init Successful: fx={fx_init:.2f}, fy={fy_init:.2f}")
+    # except Exception as e:
+    #     print(f"Zhang's Init Failed ({e}), using heuristic.")
+    #     fx_init = fy_init = (img_size[0] + img_size[1]) / 2.0
+    #     cx_init = img_size[0] / 2.0
+    #     cy_init = img_size[1] / 2.0
+    #     K_init = np.array([[fx_init, 0, cx_init], [0, fy_init, cy_init], [0, 0, 1]])
+    #     # Fallback: compute homographies individually
+    #     homographies = []
+    #     for i in range(images_num):
+    #         # Assuming Z=0 for planar object, we can compute homography
+    #         # obj_pts is Nx3, take x,y
+    #         H, _ = cv.findHomography(obj_pts[i][:, :2].astype(np.float32), img_pts[i].astype(np.float32))
+    #         homographies.append(H)
 
     # Parameter vector structure:
     # [fx, fy, cx, cy, k1, k2, p1, p2, k3, rvec_1, tvec_1, ..., rvec_N, tvec_N]
     unknown_init = [fx_init, fy_init, cx_init, cy_init, 0.0, 0.0, 0.0, 0.0, 0.0]
     
-    # 2. Initialize Extrinsics (R, t) from Homographies
-    # Do NOT use DLT for planar objects (Z=0), it is singular/unstable
+    getExtrinsicFunction = calibrate_DLT
+    # getExtrinsicFunction = get_extrinsics_from_homography
+    
+    # 2. Initialize Extrinsics (R, t) 
     for i in range(images_num):
         try:
-            R, t = get_extrinsics_from_homography(homographies[i], K_init)
+            K, R, t = getExtrinsicFunction(obj_pts[i], img_pts[i], K_init)
             rvec = Rotation.from_matrix(R).as_rotvec()
             unknown_init.extend(rvec.tolist())
             unknown_init.extend(t.tolist())
         except Exception as e:
             print(f"View {i} extrinsic init failed: {e}")
-            unknown_init.extend([0,0,0, 0,0,1])
+            unknown_init.extend([0, 0, 0, 0, 0, 1])
 
     unknown_init = np.array(unknown_init)
     
@@ -584,8 +328,11 @@ def calibrateCameraDist(obj_pts, img_pts, img_size):
         unknown_init, 
         args=(obj_pts, img_pts),
         bounds=(lower_bounds, upper_bounds),
-        verbose=2,
-        ftol=1e-10, xtol=1e-10, gtol=1e-10, max_nfev=1000
+        verbose=0,
+        ftol=1e-10, 
+        xtol=1e-10, 
+        gtol=1e-10, 
+        max_nfev=1000
     )
 
     # Extract results

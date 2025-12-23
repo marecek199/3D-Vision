@@ -2,8 +2,17 @@ import numpy as np
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 import cv2 as cv
-import computerVisionEngine as cve
 import time
+
+
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+# from cv_engine.calibrator import CameraCalibrator, CalibrationConfig
+from cv_engine.geometry import calibrate_DLT, check_linear_dependence
+from cv_engine.utilsEngine import pack_params, unpack_params
+from cv_engine.optimization import reprojection_error, gradient_optimizer
+
 
 if __name__ == '__main__':
 
@@ -20,7 +29,7 @@ if __name__ == '__main__':
 
     # Estimate camera pose
     # Initial guess using DLT method
-    K_dlt, R_dlt, t_dlt = cve.calibrate_DLT(obj_pts, img_pts)
+    K_dlt, R_dlt, t_dlt = calibrate_DLT(obj_pts, img_pts)
     if K_dlt is None:
         print("DLT zlyhalo.")
         exit()
@@ -29,28 +38,28 @@ if __name__ == '__main__':
     init_pos = -R_dlt.T @ t_dlt.flatten()
     
     # Refine using gradient descent
-    initial_params = cve.pack_params(K_dlt, R_dlt, t_dlt)
+    initial_params = pack_params(K_dlt, R_dlt, t_dlt)
     start_time = time.time()
 
-    optimized_params = cve.gradient_optimizer(initial_params, obj_pts, img_pts)
+    optimized_params = gradient_optimizer(initial_params, obj_pts, img_pts)
     elapsed_time = time.time() - start_time
     print(f"Optimization completed in {elapsed_time:.4f} seconds.")
     
-    K, R, t = cve.unpack_params(optimized_params)
+    K, R, t = unpack_params(optimized_params)
     my_ori = np.rad2deg(Rotation.from_matrix(R.T).as_euler('xyz'))
     my_pos = -R.T @ t.flatten()
 
     print("\n--- Beží Scipy least_squares (Levenberg-Marquardt)... ---")
     start_time = time.time()
     result_scipy = least_squares(
-        cve.reprojection_error, 
+        reprojection_error, 
         initial_params, 
         args=(obj_pts, img_pts),
         method='lm',
         verbose=0 
     )
     optimized_params_scipy = result_scipy.x
-    K_scipy, R_scipy, t_scipy = cve.unpack_params(optimized_params_scipy)
+    K_scipy, R_scipy, t_scipy = unpack_params(optimized_params_scipy)
     time_scipy = time.time() - start_time
     print(f"Scipy least_squares completed in {time_scipy:.4f} seconds.")
     scipy_ori = np.rad2deg(Rotation.from_matrix(R_scipy.T).as_euler('xyz'))
@@ -78,7 +87,7 @@ if __name__ == '__main__':
     print(f'* Camera orientation: {cv_ori} [deg]')
     print(f'* Camera position   : {cv_pos} [m]')
     # Check if cv_pos and my_pos are linearly dependent
-    dep, lam = cve.check_linear_dependence(cv_pos, my_pos, tolerance=1e-2)
+    dep, lam = check_linear_dependence(cv_pos, my_pos, tolerance=1e-2)
     if dep:
         print(f'\n### The position vectors are linearly dependent with scale factor: {lam:.4f}')
     else:

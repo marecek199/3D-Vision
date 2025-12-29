@@ -101,6 +101,7 @@ class CameraCalibrator:
         images_num = len(obj_pts)
         
         fx_init, fy_init, cx_init, cy_init = self._init_intrinsics(self.img_size)
+        K_init = np.array([[fx_init, 0, cx_init], [0, fy_init, cy_init], [0, 0, 1]])
         
         # 1. Initialize Intrinsics + Distortion:
         # [fx, fy, cx, cy, k1, k2, p1, p2, rvecs..., tvecs...]

@@ -145,10 +145,65 @@ def calibrate_DLT(obj_pts, img_pts, K = None) -> (np.ndarray, np.ndarray, np.nda
         A_curr[1, 8:12] = img_pts_h_norm_curr[1] * obj_pts_h[idx]
         # Assign to A
         A[2*idx:2*idx+2, :] = A_curr
-    
+
     if K is not None:
         R, t = solvers.decompose_projection_matrix(A, obj_pts)
     else:
         K, R, t = solvers.decompose_projection_matrix_rq(A, obj_pts)
     
     return K, R, t
+    
+def calibrate_DLT_homography(obj_pts, img_pts):
+    ''' Computes H using DLT with Normalization '''
+    obj_planar = obj_pts[:, :2] # Drop Z
+    
+    obj_norm, T_obj = normalize_points(obj_planar)
+    img_norm, T_img = normalize_points(img_pts)
+    
+    n = obj_pts.shape[0]
+    A = np.zeros((2 * n, 9))
+    
+    for i in range(n):
+        X, Y = obj_norm[i]
+        u, v = img_norm[i]
+        A[2*i]   = [-X, -Y, -1,  0,  0,  0, u*X, u*Y, u]
+        A[2*i+1] = [ 0,  0,  0, -X, -Y, -1, v*X, v*Y, v]
+    
+    _, _, Vt = np.linalg.svd(A)
+    H_norm = Vt[-1].reshape(3, 3)
+    
+    # Denormalize
+    H = np.linalg.inv(T_img) @ H_norm @ T_obj
+    
+    # Normalize so that H[2,2] = 1
+    H /= H[2, 2]  # Ensure H[2,2] is 1
+    
+    # Homography matrix
+    return H
+
+def warpPerspective(src, H, dst_size):
+    '''
+    Backward Mapping: Destination -> Source
+    Note: This implementation avoids holes in the output image.
+    '''
+    
+    # Create an output image
+    width, height = dst_size
+    channels = src.shape[2] if src.ndim > 2 else 1
+    dst = np.zeros((height, width, channels), dtype=src.dtype)
+    
+    # Compute the inverse homography
+    H_inv = np.linalg.inv(H)
+    
+    # Map each pixel from destination to source
+    for qy in range(height):
+        for qx in range(width):
+            # Project destination pixel (qx, qy) to source (px, py)
+            p = H_inv @ [qx, qy, 1]
+            # Normalize homogeneous coordinates
+            px, py = int(p[0]/p[-1] + 0.5), int(p[1]/p[-1] + 0.5)
+            # Check bounds and assign pixel value
+            if 0 <= px < src.shape[1] and 0 <= py < src.shape[0]:
+                dst[qy, qx] = src[py, px]
+    
+    return dst  

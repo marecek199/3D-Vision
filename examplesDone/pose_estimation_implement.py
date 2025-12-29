@@ -31,7 +31,7 @@ if __name__ == '__main__':
     # Initial guess using DLT method
     K_dlt, R_dlt, t_dlt = calibrate_DLT(obj_pts, img_pts)
     if K_dlt is None:
-        print("DLT zlyhalo.")
+        print("DLT failed.")
         exit()
     # R_dlt = Rotation.from_rotvec(rvec_dlt.flatten()).as_matrix()
     init_ori = np.rad2deg(Rotation.from_matrix(R_dlt.T).as_euler('xyz'))
@@ -49,7 +49,7 @@ if __name__ == '__main__':
     my_ori = np.rad2deg(Rotation.from_matrix(R.T).as_euler('xyz'))
     my_pos = -R.T @ t.flatten()
 
-    print("\n--- Beží Scipy least_squares (Levenberg-Marquardt)... ---")
+    print("\n--- Running Scipy least_squares (Levenberg-Marquardt)... ---")
     start_time = time.time()
     result_scipy = least_squares(
         reprojection_error, 

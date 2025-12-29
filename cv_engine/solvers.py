@@ -3,29 +3,29 @@ import scipy.linalg
 
 from . import geometry
 
-def compute_homography_normalized(obj_pts, img_pts):
-    ''' Computes H using DLT with Normalization '''
-    obj_planar = obj_pts[:, :2] # Drop Z
+# def compute_homography_normalized(obj_pts, img_pts):
+#     ''' Computes H using DLT with Normalization '''
+#     obj_planar = obj_pts[:, :2] # Drop Z
     
-    obj_norm, T_obj = geometry.normalize_points(obj_planar)
-    img_norm, T_img = geometry.normalize_points(img_pts)
+#     obj_norm, T_obj = geometry.normalize_points(obj_planar)
+#     img_norm, T_img = geometry.normalize_points(img_pts)
     
-    n = obj_pts.shape[0]
-    A = np.zeros((2 * n, 9))
+#     n = obj_pts.shape[0]
+#     A = np.zeros((2 * n, 9))
     
-    for i in range(n):
-        X, Y = obj_norm[i]
-        u, v = img_norm[i]
-        A[2*i]   = [-X, -Y, -1,  0,  0,  0, u*X, u*Y, u]
-        A[2*i+1] = [ 0,  0,  0, -X, -Y, -1, v*X, v*Y, v]
-        
-    _, _, Vt = np.linalg.svd(A)
-    H_norm = Vt[-1].reshape(3, 3)
+#     for i in range(n):
+#         X, Y = obj_norm[i]
+#         u, v = img_norm[i]
+#         A[2*i]   = [-X, -Y, -1,  0,  0,  0, u*X, u*Y, u]
+#         A[2*i+1] = [ 0,  0,  0, -X, -Y, -1, v*X, v*Y, v]
     
-    # Denormalize
-    H = np.linalg.inv(T_img) @ H_norm @ T_obj
-    return H / H[2, 2]
-
+#     _, _, Vt = np.linalg.svd(A)
+#     H_norm = Vt[-1].reshape(3, 3)
+    
+#     # Denormalize
+#     H = np.linalg.inv(T_img) @ H_norm @ T_obj
+#     return H / H[2, 2]
+    
 def create_v_ij(h, i, j):
     ''' Helper for Zhang's closed form solution '''
     # Convert indices 1-based to 0-based for python
@@ -50,7 +50,7 @@ def init_camera_matrix_zhang(obj_pts_list, img_pts_list, img_size):
     homographies = []
     
     for obj_p, img_p in zip(obj_pts_list, img_pts_list):
-        H = compute_homography_normalized(obj_p, img_p)
+        H = geometry.calibrate_DLT_homography(obj_p, img_p)
         homographies.append(H)
         
         # Constraints based on orthogonality of rotation columns

@@ -6,54 +6,6 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import cv_engine.geometry as geometry
 
-def evaluate_homography(H, p, q):
-    ''' 
-    Evaluate the homography H by calculating the reprojection error from point p to q    
-    '''
-    # Calculate the reprojection error
-    p2q = H @ np.array([[p[0]], [p[1]], [1]])
-    
-    if abs(p2q[2]) < 1e-10:
-        return float('inf')
-    p2q /= p2q[-1]    
-    
-    # Evaluate reprojection error
-    error = np.linalg.norm(p2q[:2].flatten() - q)
-    return error
-
-def findHomography(src, dst, n_sample, ransac_trial, ransac_threshold):
-    '''
-    1. Implement RANSAC-based homography estimation here.
-    2. Use `geometry.calibrate_DLT_homography` to estimate homography from n_sample points.
-    3. Return the best homography and the inlier mask.
-    '''
-    best_score = -1
-    best_model = None
-    
-    for _ in range(ransac_trial):
-        # Step 1: Hypothesis generation
-        sample_idx = np.random.choice(range(len(src)), size=n_sample, replace=False)
-        model = geometry.calibrate_DLT_homography(src[sample_idx], dst[sample_idx])
-        
-        # Step 2: Hypothesis evaluation
-        score = 0
-        for (p, q) in zip(src, dst):
-            error = evaluate_homography(model, p, q)
-            if error < ransac_threshold:
-                score += 1
-        if score > best_score:
-            best_score = score
-            best_model = model
-
-    # Generate the best inlier mask
-    best_inlier_mask = np.zeros(len(src), dtype=np.uint8)
-    for idx, (p, q) in enumerate(zip(src, dst)):
-        error = evaluate_homography(best_model, p, q)
-        if error < ransac_threshold:
-            best_inlier_mask[idx] = 1
-
-    return best_model, best_inlier_mask
-
 if __name__ == '__main__':
     # Load two images
     try:
@@ -91,7 +43,7 @@ if __name__ == '__main__':
     
     # Calculate homography using RANSAC
     # log(1 - 0.999) / log(1 - 0.3^4) = 849
-    H, inlier_mask = findHomography(pts2, pts1, n_sample=4, ransac_trial=500, ransac_threshold=2.0)
+    H, inlier_mask = geometry.findHomography(pts2, pts1, n_sample=4, ransac_trial=500, ransac_threshold=2.0)
     img_merged = geometry.warpPerspective(img2, H, (img1.shape[1]*2, img1.shape[0]))
     
     # Copy first part of img1 to the merged image

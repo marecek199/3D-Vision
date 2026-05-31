@@ -1,8 +1,7 @@
 import numpy as np
 import cv2 as cv
 
-import sys
-import os
+import sys; import os;
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from cv_engine.calibrator import CameraCalibrator, CalibrationConfig
 
@@ -19,7 +18,7 @@ def select_img_from_video(video_file, board_pattern, select_all=False, wait_msec
         valid, img = video.read()
         if not valid:
             break
-        
+
         if select_all:
             img_select.append(img)
         else:            
@@ -61,7 +60,6 @@ def calib_camera_from_chessboard(images, board_pattern, board_cellsize, K=None, 
     config = CalibrationConfig(use_zhang_init=True, use_homography_init=True, use_distortion=True, verbose=1)
     calibrator = CameraCalibrator(img.shape[1::-1], config)
     
-         
     # Calibrate the camera
     rms, K, dist_coeff, rvecs, tvecs = cv.calibrateCamera(obj_pts, img_points, gray.shape[::-1], K, dist_coeff, flags=calib_flags)
     rms1, K1, dist_coeff1, rvecs1, tvecs1 = calibrator.calibrate(obj_pts, img_points)

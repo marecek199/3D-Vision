@@ -40,7 +40,7 @@ if __name__ == '__main__':
 
         # Extract Harris corners
         harris = cornerHarris(gray)
-        corners = harris > 5e8
+        corners = harris > 2e9
 
         # Show the corners on the image
         heatmap = np.dstack((np.zeros_like(corners), np.zeros_like(corners), corners*255))

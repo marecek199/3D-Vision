@@ -13,7 +13,7 @@ if __name__ == '__main__':
 
     # my_H = geometry.calibrate_DLT(src, dst)
     my_H = geometry.calibrate_DLT_homography(src, dst)
-    cv_H = cv.getPerspectiveTransform(src, dst) # Note) It accepts only 4 pairs of points.
+    cv_H = cv.getPerspectiveTransform(src, dst)
 
     print('\n### My Planar Homography')
     print(my_H)

@@ -9,8 +9,8 @@ import cv_engine.geometry as geometry
 if __name__ == '__main__':
     # Load two images
     try:
-        img1 = cv.imread('../data/hill01.jpg')
-        img2 = cv.imread('../data/hill02.jpg')
+        img1 = cv.imread('data/hill01.jpg')
+        img2 = cv.imread('data/hill02.jpg')
     except:
         img1 = cv.imread('data/hill01.jpg')
         img2 = cv.imread('data/hill02.jpg')
@@ -23,6 +23,7 @@ if __name__ == '__main__':
     if img1 is None or img2 is None:
         print("Error: Could not load images. Check the file paths.")
         sys.exit(1)
+        
         
     # Retrieve matching points
     fdetector = cv.BRISK_create()
@@ -56,6 +57,8 @@ if __name__ == '__main__':
                                  )
     
     merge = np.vstack((np.hstack((img1, img2)), img_matched, img_merged))
+    print(f'Planar Image Stitching with My RANSAC (score={sum(inlier_mask)})')
+    
     cv.imshow(f'Planar Image Stitching with My RANSAC (score={sum(inlier_mask)})', merge)
     cv.imshow('Matched keypoints', img_matched)
     cv.imshow('Merged image', img_merged)

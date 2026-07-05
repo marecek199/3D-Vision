@@ -8,6 +8,10 @@ import numpy as np
 import time
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+import sys, os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from cv_engine.detector_dnn import DetectorDnn
+from lightglue.utils import rbd
 
 # ============================================================================
 # UTILITY FUNCTIONS
@@ -619,14 +623,17 @@ def main():
     print("="*70)
 
     # ========================================================================
-    # STAGE 1: LOAD IMAGES & EXTRACT FEATURES
+    # STAGE 1: LOAD IMAGES & EXTRACT DNN FEATURES (SuperPoint)
     # ========================================================================
-    print("\n[Stage 1] Loading images and extracting features...")
-    
+    print("\n[Stage 1] Loading images and extracting DNN features...")
+
+    detector_dnn = DetectorDnn(detector='SUPERPOINT', processing_size=None,
+                               max_keypoints=2048, confidence_threshold=0.2)
+
     img_keypoints = []
     img_descriptors = []
     img_set = []
-    detector = cv2.BRISK_create()
+    feats_list = []                      # per-image LightGlue feature dicts
     cam = cv2.VideoCapture(img_path)
 
     while True:
@@ -634,9 +641,17 @@ def main():
         if img is None:
             break
         img = cv2.resize(img, dsize=(0, 0), fx=img_resize, fy=img_resize)
-        img_keypoint, img_descriptor = detector.detectAndCompute(img, None)
-        img_keypoints.append(img_keypoint)
-        img_descriptors.append(img_descriptor)
+
+        tensor = detector_dnn._preprocess_image(img)
+        feats  = detector_dnn.extract_features(tensor)
+        kpts   = rbd(feats)['keypoints'].cpu().numpy()      # (N,2) in img coords
+
+        # adapt -> list of cv2.KeyPoint so the rest of the pipeline is unchanged
+        keypoints = [cv2.KeyPoint(float(x), float(y), 1.0) for x, y in kpts]
+
+        feats_list.append(feats)
+        img_keypoints.append(keypoints)
+        img_descriptors.append(None)                        # unused with DNN
         img_set.append(img)
     cam.release()
 
@@ -648,26 +663,27 @@ def main():
     img_keypoints = np.array(img_keypoints, dtype=object)
     img_descriptors = np.array(img_descriptors, dtype=object)
     img_set = np.array(img_set)
-    
+
     print(f"✓ Loaded {len(img_set)} images")
 
     # ========================================================================
-    # STAGE 2: FEATURE MATCHING
+    # STAGE 2: LIGHTGLUE FEATURE MATCHING
     # ========================================================================
-    print("\n[Stage 2] Feature matching...")
-    
-    fmatcher = cv2.DescriptorMatcher_create("BruteForce-Hamming")
+    print("\n[Stage 2] Feature matching (LightGlue)...")
+
     match_pair, match_inlier = [], []
-    
+
     for i in range(len(img_set)):
         for j in range(i+1, len(img_set)):
-            src, dst, inlier = [], [], []
-            match = fmatcher.match(img_descriptors[i], img_descriptors[j])
-            
-            if len(match) < 8:
+            # LightGlue match: indices into image i and image j keypoints
+            _, _, dnn_matches = detector_dnn.match_features(feats_list[i], feats_list[j])
+            if len(dnn_matches) < 8:
                 continue
-            
-            match = np.array(match)
+
+            # adapt -> cv2.DMatch (queryIdx=i, trainIdx=j), matching sfm convention
+            match = np.array([cv2.DMatch(int(a), int(b), 0.0) for a, b in dnn_matches])
+
+            src, dst, inlier = [], [], []
             for m in match:
                 src.append(img_keypoints[i][m.queryIdx].pt)
                 dst.append(img_keypoints[j][m.trainIdx].pt)
@@ -676,7 +692,7 @@ def main():
             dst = np.array(dst, dtype=np.float32)
 
             F, inlier_mask = cv2.findFundamentalMat(src, dst, cv2.RANSAC)
-            
+
             if inlier_mask is None:
                 continue
 
@@ -686,7 +702,7 @@ def main():
                     inlier.append(match[k])
 
             inlier = np.array(inlier)
-            
+
             if inlier.size < min_inlier_num:
                 continue
 

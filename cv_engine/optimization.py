@@ -11,8 +11,8 @@ def reprojection_error(params, X, x):
 
 def reprojection_error_multiple_views(unknown, Xs, xs):
     # Extract K from first 3 parameters
-    fx, fy, cx, cy = unknown[0:4]
-    K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
+    f, cx, cy = unknown[0:3]
+    K = np.array([[f, 0, cx], [0, f, cy], [0, 0, 1]])
     
     errors = []
     for idx, (X, x) in enumerate(zip(Xs, xs)):
@@ -51,7 +51,7 @@ def reprojection_error_multiple_views_dist(params, obj_pts_list, img_pts_list):
         # Normalize (x, y)
         z = X_cam[:, 2]
         # Avoid division by zero
-        z[np.abs(z) < 1e-6] = 1e-6
+        z[np.abs(z) < 1e-6] = 1e-9
         
         x = X_cam[:, 0] / z
         y = X_cam[:, 1] / z
@@ -143,3 +143,37 @@ def gradient_optimizer( params, obj_pts, img_pts, cost_fun = cost_function, num_
         
     print(f"Iteration {num_iterations:3d} | Final error: {cost_fun(params, obj_pts, img_pts):.4f}")
     return params
+
+
+def findFundamentalMat(src, dst, n_sample = 8, ransac_trial = 1000, ransac_threshold = 1.0):
+    '''
+    1. Implement RANSAC-based fundamental matrix estimation.
+    2. Use `geometry.findFundamentalMat` to estimate fundamental matrix from n_sample points.
+    3. Return the best fundamental matrix and the inlier mask.
+    '''
+    best_score = -1
+    best_model = None
+    
+    for _ in range(ransac_trial):
+        # Step 1: Hypothesis generation
+        sample_idx = np.random.choice(range(len(src)), size=n_sample, replace=False)
+        model = geometry.findFundamentalMat(src[sample_idx], dst[sample_idx])
+        
+        # Step 2: Hypothesis evaluation
+        score = 0
+        for (p, q) in zip(src, dst):
+            error = geometry.evaluate_fundamental(model, p, q)
+            if error < ransac_threshold:
+                score += 1
+        if score > best_score:
+            best_score = score
+            best_model = model
+
+    # Generate the best inlier mask
+    best_inlier_mask = np.zeros(len(src), dtype=np.uint8)
+    for idx, (p, q) in enumerate(zip(src, dst)):
+        error = geometry.evaluate_fundamental(best_model, p, q)
+        if error < ransac_threshold:
+            best_inlier_mask[idx] = 1
+
+    return best_model, best_inlier_mask

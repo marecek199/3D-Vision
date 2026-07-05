@@ -2,29 +2,6 @@ import numpy as np
 import scipy.linalg
 
 from . import geometry
-
-# def compute_homography_normalized(obj_pts, img_pts):
-#     ''' Computes H using DLT with Normalization '''
-#     obj_planar = obj_pts[:, :2] # Drop Z
-    
-#     obj_norm, T_obj = geometry.normalize_points(obj_planar)
-#     img_norm, T_img = geometry.normalize_points(img_pts)
-    
-#     n = obj_pts.shape[0]
-#     A = np.zeros((2 * n, 9))
-    
-#     for i in range(n):
-#         X, Y = obj_norm[i]
-#         u, v = img_norm[i]
-#         A[2*i]   = [-X, -Y, -1,  0,  0,  0, u*X, u*Y, u]
-#         A[2*i+1] = [ 0,  0,  0, -X, -Y, -1, v*X, v*Y, v]
-    
-#     _, _, Vt = np.linalg.svd(A)
-#     H_norm = Vt[-1].reshape(3, 3)
-    
-#     # Denormalize
-#     H = np.linalg.inv(T_img) @ H_norm @ T_obj
-#     return H / H[2, 2]
     
 def create_v_ij(h, i, j):
     ''' Helper for Zhang's closed form solution '''

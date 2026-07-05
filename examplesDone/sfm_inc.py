@@ -1,5 +1,7 @@
 from pickletools import read_uint1
 from scipy.spatial.transform import Rotation
+from scipy.sparse import lil_matrix
+from scipy.optimize import least_squares
 from copy import deepcopy
 import cv2
 import numpy as np
@@ -269,7 +271,94 @@ def refine_camera_pose(next_cam, cameras, object_pts, image_pts, inlier_indices,
     
     return refined_cam
 
-def incremental_reconstruction_loop(match_pair, match_inlier, img_keypoints, img_descriptors, 
+# ============================================================================
+# GLOBAL BUNDLE ADJUSTMENT
+# ============================================================================
+
+def collect_observations(registered_cameras, points_3d, point_visibility, img_keypoints):
+    """Gather (camera, point, 2D) observations from the visibility matrix."""
+    cam_ids = sorted(registered_cameras)
+    cam_local = {c: i for i, c in enumerate(cam_ids)}   # global cam id -> 0..n_cam-1
+    cam_idx, pt_idx_arr, pts_2d = [], [], []
+    for pt_idx in range(len(points_3d)):
+        for cam_id in cam_ids:
+            kp = point_visibility[pt_idx, cam_id]
+            if kp != -1:
+                cam_idx.append(cam_local[cam_id])
+                pt_idx_arr.append(pt_idx)
+                pts_2d.append(img_keypoints[cam_id][kp].pt)
+    return (cam_ids,
+            np.array(cam_idx, dtype=int),
+            np.array(pt_idx_arr, dtype=int),
+            np.array(pts_2d, dtype=np.float64))
+
+def _project(points_3d, cam_ext, f, cx, cy):
+    """Vectorized projection. cam_ext = [rvec(3), tvec(3)] per row; f/cx/cy per-observation."""
+    rvec, tvec = cam_ext[:, :3], cam_ext[:, 3:]
+    theta = np.linalg.norm(rvec, axis=1, keepdims=True)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        v = np.nan_to_num(rvec / theta)
+    cos_t, sin_t = np.cos(theta), np.sin(theta)
+    dot = np.sum(points_3d * v, axis=1, keepdims=True)
+    p_cam = (cos_t * points_3d + sin_t * np.cross(v, points_3d)
+             + (1 - cos_t) * dot * v) + tvec              # R @ X + t
+    x = p_cam[:, 0] / p_cam[:, 2]
+    y = p_cam[:, 1] / p_cam[:, 2]
+    return np.stack([f * x + cx, f * y + cy], axis=1).ravel()
+
+def run_global_bundle_adjustment(cameras, points_3d, point_visibility,
+                                 registered_cameras, img_keypoints, fix_first=True):
+    """Joint optimization of all registered extrinsics + all 3D points."""
+    cam_ids, cam_i, pt_i, pts_2d = collect_observations(
+        registered_cameras, points_3d, point_visibility, img_keypoints)
+    n_cam, n_pts, n_obs = len(cam_ids), len(points_3d), len(pts_2d)
+    if n_cam < 2 or n_obs == 0:
+        return cameras, points_3d
+
+    n_fixed  = 1 if fix_first else 0            # anchor first camera -> fixes gauge
+    n_optcam = n_cam - n_fixed
+
+    # per-observation intrinsics (kept fixed here)
+    f_arr  = np.array([cameras[c][0] for c in cam_ids])[cam_i]
+    cx_arr = np.array([cameras[c][1] for c in cam_ids])[cam_i]
+    cy_arr = np.array([cameras[c][2] for c in cam_ids])[cam_i]
+
+    ext0 = np.array([cameras[c][3:9] for c in cam_ids], dtype=np.float64)
+    pts0 = points_3d.astype(np.float64)
+    x0 = np.hstack([ext0[n_fixed:].ravel(), pts0.ravel()])
+    obs = pts_2d.ravel()
+
+    def residual(x):
+        ext = ext0.copy()
+        ext[n_fixed:] = x[:n_optcam * 6].reshape(-1, 6)
+        pts = x[n_optcam * 6:].reshape(-1, 3)
+        return _project(pts[pt_i], ext[cam_i], f_arr, cx_arr, cy_arr) - obs
+
+    # sparsity pattern
+    A = lil_matrix((2 * n_obs, n_optcam * 6 + n_pts * 3), dtype=int)
+    i = np.arange(n_obs)
+    free = cam_i >= n_fixed
+    for s in range(6):
+        cols = (cam_i[free] - n_fixed) * 6 + s
+        A[2 * i[free],     cols] = 1
+        A[2 * i[free] + 1, cols] = 1
+    off = n_optcam * 6
+    for s in range(3):
+        A[2 * i,     off + pt_i * 3 + s] = 1
+        A[2 * i + 1, off + pt_i * 3 + s] = 1
+
+    res = least_squares(residual, x0, jac_sparsity=A, method='trf',
+                        loss='huber', f_scale=2.0,          # robust to bad matches
+                        ftol=1e-4, xtol=1e-4, max_nfev=50, verbose=0)
+
+    ext_final = ext0.copy()
+    ext_final[n_fixed:] = res.x[:n_optcam * 6].reshape(-1, 6)
+    for k, c in enumerate(cam_ids):
+        cameras[c][3:9] = ext_final[k]
+    points_3d[:] = res.x[n_optcam * 6:].reshape(-1, 3)
+    return cameras, points_3d
+
+def incremental_reconstruction_loop(match_pair, match_inlier, img_keypoints, img_descriptors,
                                    cameras, points_3d, point_visibility, registered_cameras,
                                    best_cam0, best_cam1, f_init, cx_init, cy_init, 
                                    Z_limit, max_cos_parallax, img_set):
@@ -360,10 +449,44 @@ def incremental_reconstruction_loop(match_pair, match_inlier, img_keypoints, img
 
         print(f"✓ Camera {next_cam} registered")
         print(f"✓ Total 3D points: {len(points_3d)}")
-    
+
+        # STEP 7: GLOBAL BUNDLE ADJUSTMENT (all cameras + all points)
+        print(f"Step 7: Global bundle adjustment...")
+        cameras, points_3d = run_global_bundle_adjustment(
+            cameras, points_3d, point_visibility, registered_cameras, img_keypoints)
+        print(f"✓ Global BA done")
+
     return cameras, points_3d, point_visibility, registered_cameras
 
-def visualize_3d_reconstruction(points_3d, cameras, registered_cameras, camera_size=0.5):
+def get_point_colors(points_3d, point_visibility, img_keypoints, img_set, registered_cameras):
+    """Sample an RGB color for each 3D point from the image it is visible in."""
+    colors = np.zeros((len(points_3d), 3), dtype=np.uint8)
+    cam_ids = sorted(registered_cameras)
+    for pt_idx in range(len(points_3d)):
+        for cam_id in cam_ids:
+            kp = point_visibility[pt_idx, cam_id]
+            if kp != -1:
+                x, y = img_keypoints[cam_id][kp].pt
+                h, w = img_set[cam_id].shape[:2]
+                xi = min(max(int(round(x)), 0), w - 1)
+                yi = min(max(int(round(y)), 0), h - 1)
+                b, g, r = img_set[cam_id][yi, xi]
+                colors[pt_idx] = (r, g, b)   # OpenCV is BGR -> store RGB
+                break
+    return colors
+
+def save_point_cloud_ply(filename, points_3d, colors):
+    """Write a colored point cloud in ASCII PLY format."""
+    with open(filename, "wt") as f:
+        f.write("ply\nformat ascii 1.0\n")
+        f.write(f"element vertex {len(points_3d)}\n")
+        f.write("property float x\nproperty float y\nproperty float z\n")
+        f.write("property uchar red\nproperty uchar green\nproperty uchar blue\n")
+        f.write("end_header\n")
+        for p, c in zip(points_3d, colors):
+            f.write(f"{p[0]:.6f} {p[1]:.6f} {p[2]:.6f} {c[0]} {c[1]} {c[2]}\n")
+
+def visualize_3d_reconstruction(points_3d, cameras, registered_cameras, camera_size=0.5, point_colors=None):
     """
     Visualize the 3D point cloud and camera poses.
     
@@ -379,8 +502,12 @@ def visualize_3d_reconstruction(points_3d, cameras, registered_cameras, camera_s
     
     # Plot 3D points
     if len(points_3d) > 0:
-        ax.scatter(points_3d[:, 0], points_3d[:, 1], points_3d[:, 2], 
-                  c='blue', marker='.', s=1, alpha=0.6, label='3D Points')
+        if point_colors is not None:
+            ax.scatter(points_3d[:, 0], points_3d[:, 1], points_3d[:, 2],
+                      c=point_colors / 255.0, marker='.', s=1, alpha=0.6, label='3D Points')
+        else:
+            ax.scatter(points_3d[:, 0], points_3d[:, 1], points_3d[:, 2],
+                      c='blue', marker='.', s=1, alpha=0.6, label='3D Points')
     
     # Plot camera poses
     colors = plt.cm.rainbow(np.linspace(0, 1, len(registered_cameras)))
@@ -706,12 +833,21 @@ def main():
 
     print("\n[Saving results...]")
     
-    # Save 3D points
+    # Sample a color per 3D point from the source images
+    point_colors = get_point_colors(points_3d, point_visibility, img_keypoints,
+                                     img_set, registered_cameras)
+
+    # Save 3D points (x y z r g b)
     points_3d_file = "sfm_incremental_points.xyz"
     with open(points_3d_file, "wt") as f:
-        for point in points_3d:
-            f.write(f"{point[0]:.6f} {point[1]:.6f} {point[2]:.6f}\n")
+        for point, c in zip(points_3d, point_colors):
+            f.write(f"{point[0]:.6f} {point[1]:.6f} {point[2]:.6f} {c[0]} {c[1]} {c[2]}\n")
     print(f"✓ Saved 3D points to {points_3d_file}")
+
+    # Save colored point cloud in PLY format
+    points_ply_file = "sfm_incremental_points.ply"
+    save_point_cloud_ply(points_ply_file, points_3d, point_colors)
+    print(f"✓ Saved colored point cloud to {points_ply_file}")
 
     # Save camera poses
     camera_file = "sfm_incremental_cameras.xyz"
@@ -723,7 +859,8 @@ def main():
             f.write(f"{cam[6]:.6f} {cam[7]:.6f} {cam[8]:.6f}\n")
     print(f"✓ Saved camera poses to {camera_file}")
     
-    visualize_3d_reconstruction(points_3d, cameras, registered_cameras, camera_size=0.3)
+    visualize_3d_reconstruction(points_3d, cameras, registered_cameras, camera_size=0.3,
+                                point_colors=point_colors)
 
 
 if __name__ == "__main__":
